@@ -19,7 +19,7 @@ import { Schema, Service, File, Platform } from "../../../dataconnect/types";
 import { parseCloudSQLInstanceName, parseServiceName } from "../../../dataconnect/names";
 import { logger } from "../../../logger";
 import { readTemplateSync } from "../../../templates";
-import { logBullet, envOverride } from "../../../utils";
+import { logBullet, logWarning, envOverride } from "../../../utils";
 import { isBillingEnabled } from "../../../gcp/cloudbilling";
 import * as sdk from "./sdk";
 import { getPlatformFromFolder } from "../../../dataconnect/fileUtils";
@@ -29,11 +29,6 @@ const CONNECTOR_YAML_TEMPLATE = readTemplateSync("init/dataconnect/connector.yam
 const SCHEMA_TEMPLATE = readTemplateSync("init/dataconnect/schema.gql");
 const QUERIES_TEMPLATE = readTemplateSync("init/dataconnect/queries.gql");
 const MUTATIONS_TEMPLATE = readTemplateSync("init/dataconnect/mutations.gql");
-
-// serviceEnvVar is used by Firebase Console to specify which service to import.
-// It should be in the form <location>/<serviceId>
-// It must be an existing service - if set to anything else, we'll ignore it.
-const serviceEnvVar = () => envOverride("FDC_SERVICE", "");
 
 export interface RequiredInfo {
   serviceId: string;
@@ -88,12 +83,12 @@ export async function askQuestions(setup: Setup): Promise<void> {
     isNewInstance: false,
     cloudSqlDatabase: "",
     isNewDatabase: false,
-    connectors: [defaultConnector],
-    schemaGql: [defaultSchema],
+    connectors: [],
+    schemaGql: [],
     shouldProvisionCSQL: false,
   };
   // Query backend and pick up any existing services quickly.
-  info = await promptForExistingServices(setup, info, hasBilling);
+  info = await promptForExistingServices(setup, info);
 
   const requiredConfigUnset =
     info.serviceId === "" ||
@@ -104,12 +99,11 @@ export async function askQuestions(setup: Setup): Promise<void> {
     hasBilling &&
     requiredConfigUnset &&
     (await confirm({
-      message: `Would you like to configure your backend resources now?`,
-      // For Blaze Projects, configure Cloud SQL by default.
-      // TODO: For Spark projects, allow them to configure Cloud SQL but deploy as unlinked Postgres.
+      message: `Would you like to configure your Cloud SQL datasource now?`,
       default: true,
     }));
   if (shouldConfigureBackend) {
+    // TODO: Prompt for app idea and use GiF backend to generate them.
     info = await promptForService(info);
     info = await promptForCloudSQL(setup, info);
 
@@ -122,14 +116,6 @@ export async function askQuestions(setup: Setup): Promise<void> {
         default: true,
       }))
     );
-  } else {
-    // Ensure that the suggested name is DNS compatible
-    const defaultServiceId = toDNSCompatibleId(basename(process.cwd()));
-    info.serviceId = info.serviceId || defaultServiceId;
-    info.cloudSqlInstanceId =
-      info.cloudSqlInstanceId || `${info.serviceId.toLowerCase() || "app"}-fdc`;
-    info.locationId = info.locationId || `us-central1`;
-    info.cloudSqlDatabase = info.cloudSqlDatabase || `fdcdb`;
   }
   setup.featureInfo = setup.featureInfo || {};
   setup.featureInfo.dataconnect = info;
@@ -137,7 +123,7 @@ export async function askQuestions(setup: Setup): Promise<void> {
 
 // actuate writes product specific files and makes product specifc API calls.
 // It does not handle writing firebase.json and .firebaserc
-export async function actuate(setup: Setup, config: Config): Promise<void> {
+export async function actuate(setup: Setup, config: Config, options: any): Promise<void> {
   // Most users will want to persist data between emulator runs, so set this to a reasonable default.
   const dir: string = config.get("dataconnect.source", "dataconnect");
   const dataDir = config.get("emulators.dataconnect.dataDir", `${dir}/.dataconnect/pgliteData`);
@@ -147,7 +133,21 @@ export async function actuate(setup: Setup, config: Config): Promise<void> {
   if (!info) {
     throw new Error("Data Connect feature RequiredInfo is not provided");
   }
-  await writeFiles(config, info);
+  // Populate the default values of required fields.
+  const defaultServiceId = toDNSCompatibleId(basename(process.cwd()));
+  info.serviceId = info.serviceId || defaultServiceId;
+  info.cloudSqlInstanceId =
+    info.cloudSqlInstanceId || `${info.serviceId.toLowerCase() || "app"}-fdc`;
+  info.locationId = info.locationId || `us-central1`;
+  info.cloudSqlDatabase = info.cloudSqlDatabase || `fdcdb`;
+  // Make sure to add some GQL files.
+  // Use the template if it starts from scratch or the existing service has no GQL source.
+  if (!info.schemaGql.length && !info.connectors.flatMap((r) => r.files).length) {
+    info.schemaGql = [defaultSchema];
+    info.connectors = [defaultConnector];
+  }
+
+  await writeFiles(config, info, options);
 
   if (setup.projectId && info.shouldProvisionCSQL) {
     await provisionCloudSql({
@@ -175,27 +175,17 @@ export async function postSetup(setup: Setup, config: Config): Promise<void> {
   }
 }
 
-async function writeFiles(config: Config, info: RequiredInfo) {
+async function writeFiles(config: Config, info: RequiredInfo, options: any): Promise<void> {
   const dir: string = config.get("dataconnect.source") || "dataconnect";
   const subbedDataconnectYaml = subDataconnectYamlValues({
     ...info,
     connectorDirs: info.connectors.map((c) => c.path),
   });
-  // If we are starting from a fresh project without data connect,
-  if (!config.get("dataconnect.source")) {
-    // Make sure to add add some GQL files.
-    // Use the template if the existing service is empty (no schema / connector GQL).
-    if (!info.schemaGql.length && !info.connectors.flatMap((r) => r.files).length) {
-      info.schemaGql = [defaultSchema];
-      info.connectors = [defaultConnector];
-    }
-  }
-
   config.set("dataconnect", { source: dir });
   await config.askWriteProjectFile(
     join(dir, "dataconnect.yaml"),
     subbedDataconnectYaml,
-    false,
+    !!options.force,
     // Default to override dataconnect.yaml
     // Sole purpose of `firebase init dataconnect` is to update `dataconnect.yaml`.
     true,
@@ -203,7 +193,7 @@ async function writeFiles(config: Config, info: RequiredInfo) {
 
   if (info.schemaGql.length) {
     for (const f of info.schemaGql) {
-      await config.askWriteProjectFile(join(dir, "schema", f.path), f.content);
+      await config.askWriteProjectFile(join(dir, "schema", f.path), f.content, !!options.force);
     }
   } else {
     // Even if the schema is empty, lets give them an empty .gql file to get started.
@@ -266,58 +256,19 @@ function subConnectorYamlValues(replacementValues: { connectorId: string }): str
   return replaced;
 }
 
-async function promptForExistingServices(
-  setup: Setup,
-  info: RequiredInfo,
-  isBillingEnabled: boolean,
-): Promise<RequiredInfo> {
-  if (!setup.projectId || !isBillingEnabled) {
-    // TODO(b/368609569): Don't gate this behind billing once backend billing fix is rolled out.
+async function promptForExistingServices(setup: Setup, info: RequiredInfo): Promise<RequiredInfo> {
+  // Check for existing Firebase Data Connect services.
+  if (!setup.projectId) {
     return info;
   }
-
-  // Check for existing Firebase Data Connect services.
   const existingServices = await listAllServices(setup.projectId);
   const existingServicesAndSchemas = await Promise.all(
     existingServices.map(async (s) => {
-      return {
-        service: s,
-        schema: await getSchema(s.name),
-      };
+      return { service: s, schema: await getSchema(s.name) };
     }),
   );
   if (existingServicesAndSchemas.length) {
-    let choice: { service: Service; schema?: Schema } | undefined;
-    const [serviceLocationFromEnvVar, serviceIdFromEnvVar] = serviceEnvVar().split("/");
-    const serviceFromEnvVar = existingServicesAndSchemas.find((s) => {
-      const serviceName = parseServiceName(s.service.name);
-      return (
-        serviceName.serviceId === serviceIdFromEnvVar &&
-        serviceName.location === serviceLocationFromEnvVar
-      );
-    });
-    if (serviceFromEnvVar) {
-      choice = serviceFromEnvVar;
-    } else {
-      interface Choice {
-        service: Service;
-        schema?: Schema;
-      }
-      const choices: Array<{ name: string; value: Choice | undefined }> =
-        existingServicesAndSchemas.map((s) => {
-          const serviceName = parseServiceName(s.service.name);
-          return {
-            name: `${serviceName.location}/${serviceName.serviceId}`,
-            value: s,
-          };
-        });
-      choices.push({ name: "Create a new service", value: undefined });
-      choice = await select<Choice | undefined>({
-        message:
-          "Your project already has existing services. Which would you like to set up local files for?",
-        choices,
-      });
-    }
+    const choice = await chooseExistingService(existingServicesAndSchemas);
     if (choice) {
       const serviceName = parseServiceName(choice.service.name);
       info.serviceId = serviceName.serviceId;
@@ -355,6 +306,60 @@ async function promptForExistingServices(
     }
   }
   return info;
+}
+
+interface serviceAndSchema {
+  service: Service;
+  schema?: Schema;
+}
+
+/**
+ * Picks create new service or an existing service from the list of services.
+ *
+ * Firebase Console can provide `FDC_CONNECTOR` or `FDC_SERVICE` environment variable.
+ * If either is present, chooseExistingService try to match it with any existing service
+ * and short-circuit the prompt.
+ *
+ * `FDC_SERVICE` should have the format `<location>/<serviceId>`.
+ * `FDC_CONNECTOR` should have the same `<location>/<serviceId>/<connectorId>`.
+ * @param existing
+ */
+async function chooseExistingService(
+  existing: serviceAndSchema[],
+): Promise<serviceAndSchema | undefined> {
+  const serviceEnvVar = envOverride("FDC_CONNECTOR", "") || envOverride("FDC_SERVICE", "");
+  if (serviceEnvVar) {
+    const [serviceLocationFromEnvVar, serviceIdFromEnvVar] = serviceEnvVar.split("/");
+    const serviceFromEnvVar = existing.find((s) => {
+      const serviceName = parseServiceName(s.service.name);
+      return (
+        serviceName.serviceId === serviceIdFromEnvVar &&
+        serviceName.location === serviceLocationFromEnvVar
+      );
+    });
+    if (serviceFromEnvVar) {
+      logBullet(
+        `Picking up the existing service ${clc.bold(serviceLocationFromEnvVar + "/" + serviceIdFromEnvVar)}.`,
+      );
+      return serviceFromEnvVar;
+    }
+    logWarning(`Unable to pick up an existing service based on FDC_SERVICE=${serviceEnvVar}.`);
+  }
+  const choices: Array<{ name: string; value: serviceAndSchema | undefined }> = existing.map(
+    (s) => {
+      const serviceName = parseServiceName(s.service.name);
+      return {
+        name: `${serviceName.location}/${serviceName.serviceId}`,
+        value: s,
+      };
+    },
+  );
+  choices.push({ name: "Create a new service", value: undefined });
+  return await select<serviceAndSchema | undefined>({
+    message:
+      "Your project already has existing services. Which would you like to set up local files for?",
+    choices,
+  });
 }
 
 async function promptForCloudSQL(setup: Setup, info: RequiredInfo): Promise<RequiredInfo> {
