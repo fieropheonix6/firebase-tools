@@ -35,15 +35,25 @@ export const command = new Command("login")
 
     if (!options.reauth) {
       utils.logBullet(
-        "Firebase optionally collects CLI and Emulator Suite usage and error reporting information to help improve our products. Data is collected in accordance with Google's privacy policy (https://policies.google.com/privacy) and is not used to identify you.\n",
+        "The Firebase CLI’s MCP server feature can optionally make use of Gemini in Firebase. " +
+          "Learn more about Gemini in Firebase and how it uses your data: https://firebase.google.com/docs/gemini-in-firebase#how-gemini-in-firebase-uses-your-data",
+      );
+      const geminiUsage = await confirm("Enable Gemini in Firebase features?");
+      configstore.set("gemini", geminiUsage);
+
+      logger.info();
+      utils.logBullet(
+        "Firebase optionally collects CLI and Emulator Suite usage and error reporting information to help improve our products. Data is collected in accordance with Google's privacy policy (https://policies.google.com/privacy) and is not used to identify you.",
       );
       const collectUsage = await confirm(
         "Allow Firebase to collect CLI and Emulator Suite usage and error reporting information?",
       );
       configstore.set("usage", collectUsage);
-      if (collectUsage) {
+
+      if (geminiUsage || collectUsage) {
+        logger.info();
         utils.logBullet(
-          "To change your data collection preference at any time, run `firebase logout` and log in again.",
+          "To change your the preference at any time, run `firebase logout` and `firebase login` again.",
         );
       }
     }

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { tool } from "../../tool.js";
 import { toContent } from "../../util.js";
-import { generateSchema } from "../../../gif/fdcExperience.js";
+import { generateSchema } from "../../../gemini/fdcExperience.js";
 
 export const generate_schema = tool(
   {
@@ -12,17 +12,17 @@ export const generate_schema = tool(
       prompt: z.string().describe("A description of an app that you are interested in building"),
     }),
     annotations: {
-      title: "Generate a Firebase Data Connect Schema for a new Firebase project.",
+      title: "Generate Data Connect Schema",
       readOnlyHint: true,
     },
     _meta: {
       requiresProject: true,
       requiresAuth: true,
-      // TODO: Create an endpoint to check for GiF activiation.
+      requiresGemini: true,
     },
   },
   async ({ prompt }, { projectId }) => {
-    const schema = await generateSchema(prompt, projectId!);
+    const schema = await generateSchema(prompt, projectId);
     return toContent(schema);
   },
 );

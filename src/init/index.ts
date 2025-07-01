@@ -26,11 +26,15 @@ export interface Setup {
 }
 
 export interface SetupInfo {
+  database?: features.DatabaseInfo;
+  firestore?: features.FirestoreInfo;
   dataconnect?: features.DataconnectInfo;
+  storage?: features.StorageInfo;
 }
 
 interface Feature {
   name: string;
+  displayName?: string;
   // OLD WAY: A single setup function to ask questions and actuate the setup.
   doSetup?: (setup: Setup, config: Config, options: Options) => Promise<unknown>;
 
@@ -45,11 +49,18 @@ interface Feature {
 
 const featuresList: Feature[] = [
   { name: "account", doSetup: features.account },
-  { name: "database", doSetup: features.database },
-  { name: "firestore", doSetup: features.firestore },
+  {
+    name: "database",
+    askQuestions: features.databaseAskQuestions,
+    actuate: features.databaseActuate,
+  },
+  {
+    name: "firestore",
+    askQuestions: features.firestoreAskQuestions,
+    actuate: features.firestoreActuate,
+  },
   {
     name: "dataconnect",
-    // doSetup is split into 2 phases - ask questions and then actuate files and API calls based on those answers.
     askQuestions: features.dataconnectAskQuestions,
     actuate: features.dataconnectActuate,
     postSetup: features.dataconnectPostSetup,
@@ -57,19 +68,23 @@ const featuresList: Feature[] = [
   { name: "dataconnect:sdk", doSetup: features.dataconnectSdk },
   { name: "functions", doSetup: features.functions },
   { name: "hosting", doSetup: features.hosting },
-  { name: "storage", doSetup: features.storage },
+  {
+    name: "storage",
+    askQuestions: features.storageAskQuestions,
+    actuate: features.storageActuate,
+  },
   { name: "emulators", doSetup: features.emulators },
   { name: "extensions", doSetup: features.extensions },
   { name: "project", doSetup: features.project }, // always runs, sets up .firebaserc
   { name: "remoteconfig", doSetup: features.remoteconfig },
   { name: "hosting:github", doSetup: features.hostingGithub },
   { name: "genkit", doSetup: features.genkit },
-  { name: "apphosting", doSetup: features.apphosting },
+  { name: "apphosting", displayName: "App Hosting", doSetup: features.apphosting },
 ];
 
 const featureMap = new Map(featuresList.map((feature) => [feature.name, feature]));
 
-export async function init(setup: Setup, config: any, options: any): Promise<any> {
+export async function init(setup: Setup, config: Config, options: any): Promise<any> {
   const nextFeature = setup.features?.shift();
   if (nextFeature) {
     const f = featureMap.get(nextFeature);
@@ -82,7 +97,9 @@ export async function init(setup: Setup, config: any, options: any): Promise<any
       );
     }
 
-    logger.info(clc.bold(`\n${clc.white("===")} ${capitalize(nextFeature)} Setup`));
+    logger.info(
+      clc.bold(`\n${clc.white("===")} ${f.displayName || capitalize(nextFeature)} Setup`),
+    );
 
     if (f.doSetup) {
       await f.doSetup(setup, config, options);
@@ -99,4 +116,36 @@ export async function init(setup: Setup, config: any, options: any): Promise<any
     }
     return init(setup, config, options);
   }
+}
+
+export async function actuate(setup: Setup, config: Config, options: any): Promise<any> {
+  const nextFeature = setup.features?.shift();
+  if (nextFeature) {
+    const f = lookupFeature(nextFeature);
+    logger.info(clc.bold(`\n${clc.white("===")} ${capitalize(nextFeature)} Setup Actuation`));
+
+    if (f.doSetup) {
+      throw new FirebaseError(
+        `The feature ${nextFeature} does not support actuate yet. Please run ${clc.bold("firebase init " + nextFeature)} instead.`,
+      );
+    } else {
+      if (f.actuate) {
+        await f.actuate(setup, config, options);
+      }
+    }
+    return actuate(setup, config, options);
+  }
+}
+
+function lookupFeature(feature: string): Feature {
+  const f = featureMap.get(feature);
+  if (!f) {
+    const availableFeatures = Object.keys(features)
+      .filter((f) => f !== "project")
+      .join(", ");
+    throw new FirebaseError(
+      `${clc.bold(feature)} is not a valid feature. Must be one of ${availableFeatures}`,
+    );
+  }
+  return f;
 }
